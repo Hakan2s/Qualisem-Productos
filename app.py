@@ -67,6 +67,8 @@ def init_db():
             cantidad REAL NOT NULL,
             usuario TEXT,
             notas TEXT,
+            empresa TEXT,
+            estado_pago TEXT CHECK (estado_pago IN ('pagado','debe')),
             FOREIGN KEY(producto_id) REFERENCES productos(id) ON DELETE CASCADE
         );
         """
@@ -76,7 +78,22 @@ def init_db():
     conn.close()
 
 
+def migrate_db():
+    """Asegura columnas nuevas en 'movimientos' para instalaciones existentes."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(movimientos);")
+    cols = {row[1] for row in cur.fetchall()}  # names
+    if "empresa" not in cols:
+        cur.execute("ALTER TABLE movimientos ADD COLUMN empresa TEXT;")
+    if "estado_pago" not in cols:
+        cur.execute("ALTER TABLE movimientos ADD COLUMN estado_pago TEXT;")
+    conn.commit()
+    conn.close()
+
+
 init_db()
+migrate_db()
 
 # =============== Funciones DAO ===============
 
@@ -104,7 +121,7 @@ def list_productos_df() -> pd.DataFrame:
     return df
 
 
-def get_producto(producto_id: int) -> Dict | None:
+def get_producto(producto_id: int):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -142,7 +159,16 @@ def delete_producto(producto_id: int):
     conn.close()
 
 
-def registrar_movimiento(producto_id: int, tipo: Literal['entrada','salida'], cantidad: float, usuario: str | None, notas: str | None, fecha_str: str):
+def registrar_movimiento(
+    producto_id: int,
+    tipo: Literal['entrada','salida'],
+    cantidad: float,
+    usuario: str | None,
+    notas: str | None,
+    fecha_str: str,
+    empresa: str | None,
+    estado_pago: Literal['pagado','debe'] | None,
+):
     if cantidad <= 0:
         raise ValueError("La cantidad debe ser mayor a 0")
 
@@ -166,10 +192,10 @@ def registrar_movimiento(producto_id: int, tipo: Literal['entrada','salida'], ca
     # Inserta movimiento
     cur.execute(
         """
-        INSERT INTO movimientos (producto_id, fecha, tipo, cantidad, usuario, notas)
-        VALUES (?,?,?,?,?,?)
+        INSERT INTO movimientos (producto_id, fecha, tipo, cantidad, usuario, notas, empresa, estado_pago)
+        VALUES (?,?,?,?,?,?,?,?)
         """,
-        (producto_id, fecha_str, tipo, cantidad, usuario, notas),
+        (producto_id, fecha_str, tipo, cantidad, usuario, notas, empresa, estado_pago),
     )
 
     # Actualiza stock
@@ -179,10 +205,17 @@ def registrar_movimiento(producto_id: int, tipo: Literal['entrada','salida'], ca
     conn.close()
 
 
-def movimientos_df(f_ini: str | None = None, f_fin: str | None = None, producto_id: int | None = None, tipo: str | None = None) -> pd.DataFrame:
+def movimientos_df(
+    f_ini: str | None = None,
+    f_fin: str | None = None,
+    producto_id: int | None = None,
+    tipo: str | None = None,
+    estado_pago: str | None = None,
+    empresa: str | None = None,
+) -> pd.DataFrame:
     conn = get_conn()
     query = [
-        "SELECT m.id, m.fecha, m.tipo, m.cantidad, m.usuario, m.notas,",
+        "SELECT m.id, m.fecha, m.tipo, m.cantidad, m.usuario, m.notas, m.empresa, m.estado_pago,",
         "p.nombre AS producto, p.ingrediente_activo, p.categoria, p.peligrosidad, p.unidad",
         "FROM movimientos m JOIN productos p ON p.id = m.producto_id",
         "WHERE 1=1",
@@ -200,10 +233,17 @@ def movimientos_df(f_ini: str | None = None, f_fin: str | None = None, producto_
     if tipo in ("entrada", "salida"):
         query.append("AND m.tipo = ?")
         params.append(tipo)
+    if estado_pago in ("pagado", "debe"):
+        query.append("AND m.estado_pago = ?")
+        params.append(estado_pago)
+    if empresa:
+        query.append("AND m.empresa LIKE ?")
+        params.append(f"%{empresa}%")
 
     query.append("ORDER BY datetime(m.fecha) DESC, m.id DESC")
 
-    df = pd.read_sql_query("\n".join(query), conn, params=params)
+    df = pd.read_sql_query("
+".join(query), conn, params=params)
     conn.close()
     return df
 
@@ -329,13 +369,28 @@ with TAB_MOV:
         with c3:
             fecha = st.date_input("Fecha", value=date.today())
 
+        c4, c5 = st.columns(2)
+        with c4:
+            empresa = st.text_input("Empresa (proveedor/origen)", placeholder="Ej: AgroPerú SAC")
+        with c5:
+            estado_pago = st.selectbox("Estado de pago", options=["pagado", "debe"], index=1)
+
         usuario = st.text_input("Usuario/Responsable (opcional)")
         notas = st.text_area("Notas (lote, proveedor, destino, etc.)", height=80)
 
         if st.button("Registrar movimiento", type="primary"):
             try:
                 fecha_str = datetime.combine(fecha, datetime.min.time()).strftime("%Y-%m-%d %H:%M:%S")
-                registrar_movimiento(int(producto_id), tipo, float(cantidad), usuario.strip() or None, notas.strip() or None, fecha_str)
+                registrar_movimiento(
+                    int(producto_id),
+                    tipo,
+                    float(cantidad),
+                    usuario.strip() or None,
+                    notas.strip() or None,
+                    fecha_str,
+                    empresa.strip() or None,
+                    estado_pago,
+                )
                 st.success(f"Movimiento de **{tipo}** registrado")
             except Exception as e:
                 st.error(f"No se pudo registrar: {e}")
@@ -413,7 +468,6 @@ with TAB_HIST:
     with c2:
         f_fin = st.date_input("Hasta", value=None, format="YYYY-MM-DD")
     with c3:
-        # cargar productos para selector
         dfp = list_productos_df()
         prod_map = {0: "Todos"}
         if not dfp.empty:
@@ -422,12 +476,26 @@ with TAB_HIST:
     with c4:
         tipo = st.selectbox("Tipo", options=["Todos", "entrada", "salida"], index=0)
 
+    c5, c6 = st.columns(2)
+    with c5:
+        f_estado_pago = st.selectbox("Estado de pago", options=["Todos", "pagado", "debe"], index=0)
+    with c6:
+        f_empresa = st.text_input("Empresa contiene")
+
     f_ini_str = f_ini.strftime("%Y-%m-%d") if isinstance(f_ini, date) else None
     f_fin_str = f_fin.strftime("%Y-%m-%d") if isinstance(f_fin, date) else None
     tipo_query = None if tipo == "Todos" else tipo
     pid_query = None if sel_pid == 0 else int(sel_pid)
+    estado_pago_query = None if f_estado_pago == "Todos" else f_estado_pago
 
-    df_hist = movimientos_df(f_ini=f_ini_str, f_fin=f_fin_str, producto_id=pid_query, tipo=tipo_query)
+    df_hist = movimientos_df(
+        f_ini=f_ini_str,
+        f_fin=f_fin_str,
+        producto_id=pid_query,
+        tipo=tipo_query,
+        estado_pago=estado_pago_query,
+        empresa=f_empresa or None,
+    )
 
     if df_hist.empty:
         st.info("Sin movimientos para los filtros actuales.")
@@ -437,9 +505,12 @@ with TAB_HIST:
         # Resumen rápido
         entradas = df_hist[df_hist["tipo"] == "entrada"]["cantidad"].sum()
         salidas = df_hist[df_hist["tipo"] == "salida"]["cantidad"].sum()
-        c1, c2, c3 = st.columns(3)
+        pagado_sum = df_hist[df_hist["estado_pago"] == "pagado"]["cantidad"].sum() if "estado_pago" in df_hist.columns else 0
+        debe_sum = df_hist[df_hist["estado_pago"] == "debe"]["cantidad"].sum() if "estado_pago" in df_hist.columns else 0
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Entradas (sum)", f"{entradas:.2f}")
         c2.metric("Salidas (sum)", f"{salidas:.2f}")
-        c3.metric("Balance", f"{(entradas - salidas):.2f}")
+        c3.metric("Pagado (sum)", f"{pagado_sum:.2f}")
+        c4.metric("Debe (sum)", f"{debe_sum:.2f}")
 
 st.caption("© 2025 Qualisem Productos — Registro simple en Streamlit con SQLite. 🐍")
