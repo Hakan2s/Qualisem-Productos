@@ -1,3 +1,29 @@
+"""
+Qualisem Productos — Sistema de registro de productos fitosanitarios (Streamlit + SQLite)
+Autor: ChatGPT (GPT-5 Thinking)
+Fecha: 2025-11-04
+
+Instrucciones rápidas (README):
+1) Crea un repo en GitHub y añade estos archivos:
+   - app.py  (este archivo)
+   - requirements.txt  (contenido sugerido más abajo)
+   - data/ (carpeta vacía para la BD SQLite y exportaciones CSV)
+2) Instala dependencias:  pip install -r requirements.txt
+3) Ejecuta:              streamlit run app.py
+
+requirements.txt sugerido:
+--------------------------
+streamlit>=1.37
+pandas>=2.2
+
+Notas:
+- Se usa SQLite (archivo local) sin dependencias extra.
+- El esquema cubre: productos, movimientos (entradas/salidas) y stock.
+- Campos clave de producto: nombre, ingrediente_activo, categoria y peligrosidad (rojo/amarillo/azul/verde).
+- Campos nuevos de movimiento: empresa (proveedor/origen) y estado_pago (pagado/debe).
+- Incluye validaciones, filtros, exportación a CSV y control de stock (no permite negativos).
+"""
+
 from __future__ import annotations
 import os
 import sqlite3
