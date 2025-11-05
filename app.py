@@ -267,9 +267,9 @@ def movimientos_df(
         params.append(f"%{empresa}%")
 
     query.append("ORDER BY datetime(m.fecha) DESC, m.id DESC")
-
-    df = pd.read_sql_query("
-".join(query), conn, params=params)
+    sql = "\n".join(query)
+    
+    df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
     return df
 
