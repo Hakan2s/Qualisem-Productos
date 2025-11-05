@@ -19,8 +19,8 @@ pandas>=2.2
 Notas:
 - Se usa SQLite (archivo local) sin dependencias extra.
 - El esquema cubre: productos, movimientos (entradas/salidas) y stock.
-- Campos clave de producto: nombre, ingrediente_activo, categoria y peligrosidad (rojo/amarillo/azul/verde).
-- Campos nuevos de movimiento: empresa (proveedor/origen) y estado_pago (pagado/debe).
+- Campos clave de producto: nombre, ingrediente_activo, categoria, peligrosidad (rojo/amarillo/azul/verde), **empresa** (proveedor/origen).
+- Campos de movimiento: empresa (proveedor/origen) y estado_pago (pagado/debe) por cada entrada/salida.
 - Incluye validaciones, filtros, exportación a CSV y control de stock (no permite negativos).
 """
 
@@ -78,6 +78,7 @@ def init_db():
             categoria TEXT NOT NULL,
             peligrosidad TEXT NOT NULL CHECK (peligrosidad IN ('rojo','amarillo','azul','verde')),
             unidad TEXT NOT NULL DEFAULT 'L',
+            empresa TEXT,
             stock REAL NOT NULL DEFAULT 0
         );
         """
@@ -105,14 +106,20 @@ def init_db():
 
 
 def migrate_db():
-    """Asegura columnas nuevas en 'movimientos' para instalaciones existentes."""
+    """Asegura columnas nuevas en instalaciones existentes."""
     conn = get_conn()
     cur = conn.cursor()
+    # productos.empresa
+    cur.execute("PRAGMA table_info(productos);")
+    prod_cols = {row[1] for row in cur.fetchall()}
+    if "empresa" not in prod_cols:
+        cur.execute("ALTER TABLE productos ADD COLUMN empresa TEXT;")
+    # movimientos.empresa / estado_pago
     cur.execute("PRAGMA table_info(movimientos);")
-    cols = {row[1] for row in cur.fetchall()}  # names
-    if "empresa" not in cols:
+    mov_cols = {row[1] for row in cur.fetchall()}
+    if "empresa" not in mov_cols:
         cur.execute("ALTER TABLE movimientos ADD COLUMN empresa TEXT;")
-    if "estado_pago" not in cols:
+    if "estado_pago" not in mov_cols:
         cur.execute("ALTER TABLE movimientos ADD COLUMN estado_pago TEXT;")
     conn.commit()
     conn.close()
@@ -123,15 +130,15 @@ migrate_db()
 
 # =============== Funciones DAO ===============
 
-def add_producto(nombre: str, ingrediente_activo: str, categoria: str, peligrosidad: str, unidad: str = "L"):
+def add_producto(nombre: str, ingrediente_activo: str, categoria: str, peligrosidad: str, unidad: str = "L", empresa: str | None = None):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO productos (nombre, ingrediente_activo, categoria, peligrosidad, unidad, stock)
-        VALUES (?,?,?,?,?,0)
+        INSERT INTO productos (nombre, ingrediente_activo, categoria, peligrosidad, unidad, empresa, stock)
+        VALUES (?,?,?,?,?,?,0)
         """,
-        (nombre.strip(), ingrediente_activo.strip(), categoria.strip(), peligrosidad, unidad),
+        (nombre.strip(), ingrediente_activo.strip(), categoria.strip(), peligrosidad, unidad, (empresa.strip() if empresa else None)),
     )
     conn.commit()
     conn.close()
@@ -140,7 +147,7 @@ def add_producto(nombre: str, ingrediente_activo: str, categoria: str, peligrosi
 def list_productos_df() -> pd.DataFrame:
     conn = get_conn()
     df = pd.read_sql_query(
-        "SELECT id, nombre, ingrediente_activo, categoria, peligrosidad, unidad, stock FROM productos ORDER BY nombre ASC",
+        "SELECT id, nombre, ingrediente_activo, categoria, peligrosidad, unidad, empresa, stock FROM productos ORDER BY nombre ASC",
         conn,
     )
     conn.close()
@@ -151,27 +158,27 @@ def get_producto(producto_id: int):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, nombre, ingrediente_activo, categoria, peligrosidad, unidad, stock FROM productos WHERE id=?",
+        "SELECT id, nombre, ingrediente_activo, categoria, peligrosidad, unidad, empresa, stock FROM productos WHERE id=?",
         (producto_id,),
     )
     row = cur.fetchone()
     conn.close()
     if row:
-        keys = ["id", "nombre", "ingrediente_activo", "categoria", "peligrosidad", "unidad", "stock"]
+        keys = ["id", "nombre", "ingrediente_activo", "categoria", "peligrosidad", "unidad", "empresa", "stock"]
         return dict(zip(keys, row))
     return None
 
 
-def update_producto(producto_id: int, nombre: str, ingrediente_activo: str, categoria: str, peligrosidad: str, unidad: str):
+def update_producto(producto_id: int, nombre: str, ingrediente_activo: str, categoria: str, peligrosidad: str, unidad: str, empresa: str | None):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
         UPDATE productos
-        SET nombre=?, ingrediente_activo=?, categoria=?, peligrosidad=?, unidad=?
+        SET nombre=?, ingrediente_activo=?, categoria=?, peligrosidad=?, unidad=?, empresa=?
         WHERE id=?
         """,
-        (nombre.strip(), ingrediente_activo.strip(), categoria.strip(), peligrosidad, unidad, producto_id),
+        (nombre.strip(), ingrediente_activo.strip(), categoria.strip(), peligrosidad, unidad, (empresa.strip() if empresa else None), producto_id),
     )
     conn.commit()
     conn.close()
@@ -240,35 +247,36 @@ def movimientos_df(
     empresa: str | None = None,
 ) -> pd.DataFrame:
     conn = get_conn()
-    query = [
-        "SELECT m.id, m.fecha, m.tipo, m.cantidad, m.usuario, m.notas, m.empresa, m.estado_pago,",
-        "p.nombre AS producto, p.ingrediente_activo, p.categoria, p.peligrosidad, p.unidad",
-        "FROM movimientos m JOIN productos p ON p.id = m.producto_id",
+    parts = [
+        "SELECT m.id, m.fecha, m.tipo, m.cantidad, m.usuario, m.notas, m.empresa, m.estado_pago, ",
+        "p.nombre AS producto, p.ingrediente_activo, p.categoria, p.peligrosidad, p.unidad ",
+        "FROM movimientos m JOIN productos p ON p.id = m.producto_id ",
         "WHERE 1=1",
     ]
     params = []
     if f_ini:
-        query.append("AND date(m.fecha) >= date(?)")
+        parts.append("AND date(m.fecha) >= date(?)")
         params.append(f_ini)
     if f_fin:
-        query.append("AND date(m.fecha) <= date(?)")
+        parts.append("AND date(m.fecha) <= date(?)")
         params.append(f_fin)
     if producto_id:
-        query.append("AND m.producto_id = ?")
+        parts.append("AND m.producto_id = ?")
         params.append(producto_id)
     if tipo in ("entrada", "salida"):
-        query.append("AND m.tipo = ?")
+        parts.append("AND m.tipo = ?")
         params.append(tipo)
     if estado_pago in ("pagado", "debe"):
-        query.append("AND m.estado_pago = ?")
+        parts.append("AND m.estado_pago = ?")
         params.append(estado_pago)
     if empresa:
-        query.append("AND m.empresa LIKE ?")
+        parts.append("AND m.empresa LIKE ?")
         params.append(f"%{empresa}%")
 
-    query.append("ORDER BY datetime(m.fecha) DESC, m.id DESC")
-    sql = "\n".join(query)
-    
+    parts.append("ORDER BY datetime(m.fecha) DESC, m.id DESC")
+    sql = "
+".join(parts)
+
     df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
     return df
@@ -320,13 +328,14 @@ with TAB_CATALOGO:
         with col2:
             peligrosidad = st.selectbox("Peligrosidad *", options=HAZARD_KEYS, format_func=lambda x: HAZARD_LEVELS[x])
             unidad = st.selectbox("Unidad", ["L", "mL", "kg", "g", "u"], index=0)
+        empresa_prod = st.text_input("Empresa (proveedor/origen del producto)", placeholder="Ej: AgroPerú SAC")
         submitted = st.form_submit_button("Guardar producto", type="primary")
 
     if submitted:
         if not (nombre and ingrediente and categoria):
             st.error("Completa los campos obligatorios (*)")
         else:
-            add_producto(nombre, ingrediente, categoria, peligrosidad, unidad)
+            add_producto(nombre, ingrediente, categoria, peligrosidad, unidad, empresa_prod or None)
             st.success(f"Producto **{nombre}** registrado")
 
     st.divider()
@@ -335,12 +344,13 @@ with TAB_CATALOGO:
     if df_prod.empty:
         st.info("No hay productos. Agrega el primero en el formulario de arriba.")
     else:
-        q = st.text_input("Buscar por nombre / ingrediente / categoría", key="q_catalogo")
+        q = st.text_input("Buscar por nombre / ingrediente / categoría / empresa", key="q_catalogo")
         if q:
             mask = (
                 df_prod["nombre"].str.contains(q, case=False, na=False)
                 | df_prod["ingrediente_activo"].str.contains(q, case=False, na=False)
                 | df_prod["categoria"].str.contains(q, case=False, na=False)
+                | df_prod["empresa"].str.contains(q, case=False, na=False)
             )
             df_show = df_prod[mask]
         else:
@@ -363,13 +373,14 @@ with TAB_CATALOGO:
                         new_nombre = st.text_input("Nombre", value=p["nombre"])
                         new_ing = st.text_input("Ingrediente activo", value=p["ingrediente_activo"])
                         new_cat = st.text_input("Categoría", value=p["categoria"])
+                        new_emp = st.text_input("Empresa", value=p.get("empresa") or "")
                     with c2:
                         new_pel = st.selectbox("Peligrosidad", HAZARD_KEYS, index=HAZARD_KEYS.index(p["peligrosidad"]), format_func=lambda x: HAZARD_LEVELS[x])
                         new_uni = st.selectbox("Unidad", ["L", "mL", "kg", "g", "u"], index=["L","mL","kg","g","u"].index(p["unidad"]))
 
                     c3, c4 = st.columns([1,1])
                     if c3.button("Actualizar", type="primary"):
-                        update_producto(pid, new_nombre, new_ing, new_cat, new_pel, new_uni)
+                        update_producto(pid, new_nombre, new_ing, new_cat, new_pel, new_uni, new_emp or None)
                         st.success("Producto actualizado")
                     if c4.button("Eliminar", type="secondary"):
                         delete_producto(pid)
@@ -397,7 +408,7 @@ with TAB_MOV:
 
         c4, c5 = st.columns(2)
         with c4:
-            empresa = st.text_input("Empresa (proveedor/origen)", placeholder="Ej: AgroPerú SAC")
+            empresa_mov = st.text_input("Empresa (proveedor/origen)", placeholder="Ej: AgroPerú SAC")
         with c5:
             estado_pago = st.selectbox("Estado de pago", options=["pagado", "debe"], index=1)
 
@@ -414,7 +425,7 @@ with TAB_MOV:
                     usuario.strip() or None,
                     notas.strip() or None,
                     fecha_str,
-                    empresa.strip() or None,
+                    empresa_mov.strip() or None,
                     estado_pago,
                 )
                 st.success(f"Movimiento de **{tipo}** registrado")
@@ -450,33 +461,52 @@ with TAB_INVENTARIO:
     if df_prod.empty:
         st.info("Sin productos.")
     else:
+        # Filtros
+        categorias_unicas = sorted([c for c in df_prod["categoria"].dropna().unique()])
         colf1, colf2, colf3 = st.columns([1,1,1])
         with colf1:
             f_pelig = st.multiselect("Peligrosidad", options=HAZARD_KEYS, format_func=lambda x: HAZARD_LEVELS[x])
         with colf2:
-            f_cat = st.text_input("Filtrar por categoría")
+            f_cat_multi = st.multiselect("Categorías", options=categorias_unicas, help="Selecciona una o varias categorías para ver su stock total")
         with colf3:
-            f_text = st.text_input("Buscar texto (nombre/IA)")
+            f_text = st.text_input("Buscar texto (nombre/IA/empresa)")
 
         df_show = df_prod.copy()
         if f_pelig:
             df_show = df_show[df_show["peligrosidad"].isin(f_pelig)]
-        if f_cat:
-            df_show = df_show[df_show["categoria"].str.contains(f_cat, case=False, na=False)]
+        if f_cat_multi:
+            df_show = df_show[df_show["categoria"].isin(f_cat_multi)]
         if f_text:
             mask = (
                 df_show["nombre"].str.contains(f_text, case=False, na=False)
                 | df_show["ingrediente_activo"].str.contains(f_text, case=False, na=False)
+                | df_show["empresa"].str.contains(f_text, case=False, na=False)
             )
             df_show = df_show[mask]
 
         # Indicadores simples
         total_items = len(df_show)
         total_stock = df_show["stock"].sum() if not df_show.empty else 0
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         c1.metric("Productos (filtrados)", total_items)
         c2.metric("Suma de stock", f"{total_stock:.2f}")
+        c3.metric("Categorías únicas", df_show["categoria"].nunique())
 
+        # Resumen por categoría
+        st.markdown("### 📂 Resumen por categoría")
+        if df_show.empty:
+            st.info("Sin datos para resumir.")
+        else:
+            df_sum = (
+                df_show.groupby("categoria", dropna=False)["stock"].sum().reset_index().sort_values("stock", ascending=False)
+            )
+            st.dataframe(df_sum, use_container_width=True, hide_index=True)
+            try:
+                st.bar_chart(data=df_sum.set_index("categoria")["stock"], height=240)
+            except Exception:
+                pass
+
+        st.markdown("### 📋 Detalle de productos")
         st.dataframe(
             df_with_badges(df_show),
             use_container_width=True,
@@ -484,6 +514,7 @@ with TAB_INVENTARIO:
         )
 
 # =============== Tab: Historial ===============
+
 with TAB_HIST:
     st.subheader("Historial de movimientos")
 
