@@ -247,35 +247,34 @@ def movimientos_df(
     empresa: str | None = None,
 ) -> pd.DataFrame:
     conn = get_conn()
-    parts = [
-        "SELECT m.id, m.fecha, m.tipo, m.cantidad, m.usuario, m.notas, m.empresa, m.estado_pago, ",
-        "p.nombre AS producto, p.ingrediente_activo, p.categoria, p.peligrosidad, p.unidad ",
-        "FROM movimientos m JOIN productos p ON p.id = m.producto_id ",
-        "WHERE 1=1",
-    ]
+    sql = (
+        "SELECT m.id, m.fecha, m.tipo, m.cantidad, m.usuario, m.notas, m.empresa, m.estado_pago, "
+        "p.nombre AS producto, p.ingrediente_activo, p.categoria, p.peligrosidad, p.unidad "
+        "FROM movimientos m JOIN productos p ON p.id = m.producto_id "
+        "WHERE 1=1"
+    )
+
     params = []
     if f_ini:
-        parts.append("AND date(m.fecha) >= date(?)")
+        sql += " AND date(m.fecha) >= date(?)"
         params.append(f_ini)
     if f_fin:
-        parts.append("AND date(m.fecha) <= date(?)")
+        sql += " AND date(m.fecha) <= date(?)"
         params.append(f_fin)
     if producto_id:
-        parts.append("AND m.producto_id = ?")
+        sql += " AND m.producto_id = ?"
         params.append(producto_id)
     if tipo in ("entrada", "salida"):
-        parts.append("AND m.tipo = ?")
+        sql += " AND m.tipo = ?"
         params.append(tipo)
     if estado_pago in ("pagado", "debe"):
-        parts.append("AND m.estado_pago = ?")
+        sql += " AND m.estado_pago = ?"
         params.append(estado_pago)
     if empresa:
-        parts.append("AND m.empresa LIKE ?")
+        sql += " AND m.empresa LIKE ?"
         params.append(f"%{empresa}%")
 
-    parts.append("ORDER BY datetime(m.fecha) DESC, m.id DESC")
-    sql = "
-".join(parts)
+    sql += " ORDER BY datetime(m.fecha) DESC, m.id DESC"
 
     df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
